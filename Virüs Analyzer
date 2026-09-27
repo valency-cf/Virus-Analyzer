@@ -1,0 +1,165 @@
+import os
+import re
+import hashlib
+import sys
+
+SUSPICIOUS_PYTHON_PATTERNS = {
+    "Komut Çalıştırma": [r"\bos\.system\b", r"\bsubprocess\b", r"\bos\.popen\b", r"\bexec\s*\("],
+    "Kodu Dinamik Çalıştırma / Gizleme": [r"\beval\s*\(", r"\bbase64\.b64decode\b", r"\bcodecs\.decode\b"],
+    "Ağ / Socket Bağlantısı": [r"\bsocket\.socket\b", r"\brequests\.(get|post)\b", r"\burllib\.request\b"],
+    "Sistem Manipülasyonu / Dosya Silme": [r"\bos\.remove\b", r"\bos\.rmdir\b", r"\bshutil\.rmtree\b"],
+    "Kullanıcı / Klavye İzleme (Keylogger)": [r"\bpynput\b", r"\bkeyboard\b", r"\bGetAsyncKeyState\b"]
+}
+
+SUSPICIOUS_BINARY_STRINGS = [
+    b"cmd.exe", b"powershell.exe", b"reg.exe", b"WScript.Shell",
+    b"http://", b"https://", b"CreateRemoteThread", b"VirtualAlloc",
+    b"WriteProcessMemory", b"URLDownloadToFile", b"keylog"
+]
+
+class StaticAnalyzer:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.file_name = os.path.basename(file_path)
+        self.extension = os.path.splitext(file_path)[1].lower()
+
+    def get_file_hashes(self):
+        """Dosyanın MD5 ve SHA256 hash değerlerini hesaplar."""
+        md5 = hashlib.md5()
+        sha256 = hashlib.sha256()
+
+        with open(self.file_path, "rb") as f:
+            while chunk := f.read(8192):
+                md5.update(chunk)
+                sha256.update(chunk)
+
+        return md5.hexdigest(), sha256.hexdigest()
+
+    def analyze_python_file(self):
+        """Python script'lerini metin olarak inceler ve riskli kalıpları bulur."""
+        print("\n[*] PYTHON KAYNAK KODU STATİK ANALİZİ")
+        print("-" * 60)
+
+        try:
+            with open(self.file_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+
+            risk_score = 0
+            findings = []
+
+            for line_num, line in enumerate(lines, 1):
+                clean_line = line.strip()
+                if clean_line.startswith("#"):
+                    continue
+
+                for category, patterns in SUSPICIOUS_PYTHON_PATTERNS.items():
+                    for pattern in patterns:
+                        if re.search(pattern, clean_line):
+                            risk_score += 10
+                            findings.append({
+                                "line": line_num,
+                                "category": category,
+                                "code": clean_line[:80]
+                            })
+
+            if findings:
+                print(f"[!] DİKKAT: Toplam {len(findings)} adet şüpheli kod satırı tespit edildi!\n")
+                for f in findings:
+                    print(f"  └─ Satır {f['line']} [{f['category']}]: {f['code']}")
+            else:
+                print("[+] Temiz: Kod içerisinde bilinen doğrudan zararlı kalıba rastlanmadı.")
+
+            return risk_score
+
+        except Exception as e:
+            print(f"[!] Dosya okuma hatası: {e}")
+            return 0
+
+    def analyze_binary_file(self):
+        """EXE/DLL gibi derlenmiş dosyaları 'Strings' yöntemiyle inceler."""
+        print("\n[*] İKİLİ (EXE/BINARY) DOSYA STRINGS ANALİZİ")
+        print("-" * 60)
+
+        risk_score = 0
+        found_strings = []
+
+        try:
+            with open(self.file_path, "rb") as f:
+                content = f.read()
+
+            for s_pattern in SUSPICIOUS_BINARY_STRINGS:
+                matches = re.findall(s_pattern, content, re.IGNORECASE)
+                if matches:
+                    risk_score += 15
+                    found_strings.append(s_pattern.decode('ascii', errors='ignore'))
+
+            if found_strings:
+                print(f"[!] DİKKAT: EXE dosyası içinde şüpheli sistem komutları/linkler bulundu:\n")
+                for s in set(found_strings):
+                    print(f"  └─ Tespit Edilen Metin/Komut: {s}")
+            else:
+                print("[+] Temiz: Metin dizileri arasında belirgin şüpheli sistem komutu bulunamadı.")
+
+            return risk_score
+
+        except Exception as e:
+            print(f"[!] İkili dosya okuma hatası: {e}")
+            return 0
+
+    def start_analysis(self):
+        if not os.path.exists(self.file_path):
+            print(f"[!] Hata: '{self.file_path}' bulunamadı!")
+            return
+
+        print("\n" + "="*60)
+        print(" STATİK ZARARLI YAZILIM / KOD ANALİZ ARACI")
+        print("="*60)
+        print(f"[*] Dosya Adı : {self.file_name}")
+        print(f"[*] Dosya Yolu: {os.path.abspath(self.file_path)}")
+        print(f"[*] Boyut     : {os.path.getsize(self.file_path) / 1024:.2f} KB")
+
+        md5_hash, sha256_hash = self.get_file_hashes()
+        print(f"[*] MD5       : {md5_hash}")
+        print(f"[*] SHA256    : {sha256_hash}")
+
+        risk_score = 0
+
+        if self.extension in [".py", ".pyw"]:
+            risk_score = self.analyze_python_file()
+        elif self.extension in [".exe", ".dll", ".bin"]:
+            risk_score = self.analyze_binary_file()
+        else:
+            print(f"\n[*] Genel Dosya Analizi ({self.extension})")
+            risk_score = self.analyze_binary_file()
+
+        print("\n" + "="*60)
+        print(" RİSK DEĞERLENDİRME SONUCU")
+        print("="*60)
+        
+        if risk_score == 0:
+            print(" GREEN / GÜVENLİ: Dosyada belirgin bir statik risk tespit edilmedi.")
+        elif risk_score < 30:
+            print(" YELLOW / ŞÜPHELİ: Dosya bazı hassas sistem fonksiyonları içeriyor. Kaynağına güvenmiyorsanız çalıştırmayın.")
+        else:
+            print(" RED / YÜKSEK RİSK: Dosyada kritik sistem komutları veya zararlı yazılım kalıpları tespit edildi!")
+
+        print(f"[*] Toplam Hesaplanan Risk Skoru: {risk_score}/100\n")
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) > 1:
+            target_file = sys.argv[1]
+        else:
+            target_file = input("Analiz edilecek dosya yolunu girin (Örn: test.py veya program.exe): ").strip().strip('"\'')
+
+        analyzer = StaticAnalyzer(target_file)
+        analyzer.start_analysis()
+
+    except KeyboardInterrupt:
+        print("\n\n[!] İşlem kullanıcı tarafından iptal edildi.")
+    except Exception as e:
+        print(f"\n[!] Beklenmeyen bir hata oluştu: {e}")
+    finally:
+        print("\n" + "="*60)
+        input("Analiz bitti. Terminali kapatmak için ENTER tuşuna basın...")
+
